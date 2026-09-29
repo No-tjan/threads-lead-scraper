@@ -1,0 +1,9 @@
+playwright
+pandas
+openpyxl
+
+
+Install command (they run once):
+
+pip install -r requirements.txt
+playwright install chromium

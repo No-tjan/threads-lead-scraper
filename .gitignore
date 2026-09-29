@@ -1,0 +1,17 @@
+﻿# Browser profiles (contain your logged-in session)
+*browser_profile*/
+
+# Scraper state & output (real scraped data)
+state*/
+output*/
+debug*/
+
+# Data files
+*.csv
+*.xlsx
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
