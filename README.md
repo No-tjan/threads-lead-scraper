@@ -26,9 +26,50 @@ and exports a deduplicated Excel workbook of Hot / Warm / General leads.
 - Exports a ranked Excel workbook with per-lead reasoning, so every
   classification is auditable rather than a black box
 
-## What changed this session
+## What I built
 
-Six bugs found and fixed in the classifier / extractor:
+This started as a linear single-account scraper with a basic keyword-match
+classifier, and grew into the pipeline below over several iterations:
+
+**Collection**
+- Parallel scraping architecture — multiple worker processes, each with its
+  own persistent logged-in browser profile, splitting the keyword list and
+  sharing dedup state via `multiprocessing.Manager`
+- Checkpoint/resume support, so a multi-hour scrape survives interruption
+  without losing progress or re-processing already-seen posts
+- Exhaustion-aware scrolling — a keyword stops being scraped once repeated
+  scrolls produce no new content, rather than relying on a fixed scroll count
+- A safe "type `stop` to quit" shutdown that lets in-flight posts finish and
+  checkpoints save before workers exit
+
+**Extraction**
+- DOM-based extraction that isolates a single post's own text from its
+  surrounding thread (originally a real bug: the container holding a post's
+  replies was silently getting attributed to the post's author)
+- Reply extraction with nested "view replies" expansion, distinguishing the
+  post author's own follow-up posts from other users' replies
+
+**Classification**
+- An ordered, gated classifier: hard context gate → commercial-content
+  exclusion → independent weighted signal scoring → category assignment,
+  designed so no single keyword match alone can produce a false positive
+- A subject-aware layer that reads Indonesian pronoun usage to tell "I have
+  this problem" apart from "here's advice about this problem" or "here's
+  what happened to someone else" — first/second/third-person detection,
+  past-tense detection, and a "teaching voice" detector, so educational or
+  third-party posts don't get misclassified as personal leads
+- A layered seller/advertisement detector combining explicit-language
+  patterns, promotional-language patterns, call-to-action patterns, and an
+  auto-generated blacklist of usernames that post too frequently to be
+  genuine leads
+- Reply-level scoring — a reply can independently qualify as its own lead,
+  with separate bonuses for topical relevance, "productive" replies (advice,
+  concrete numbers, personal experience), and the original poster re-engaging
+  in their own thread
+- An Indonesian slang-normalization layer covering common informal verb
+  forms and abbreviations before any pattern matching runs
+
+## Bugs fixed in the final debugging pass
 
 1. `extract_main_post_body` was returning the thread container (original
    post + replies mixed together). Fixed with a DOM check requiring exactly
@@ -66,13 +107,13 @@ playwright install chromium
 Run a self-test of the classifier (no browser required):
 
 ```bash
-python threads_kpr_scraper.py --self-test
+python threads_scraper.py --self-test
 ```
 
 Run a full scrape:
 
 ```bash
-python threads_kpr_scraper.py --target 2000 --output ./output
+python threads_scraper.py --target 2000 --output ./output
 ```
 
 On first run you'll be asked to log in to Threads manually in the opened
@@ -82,9 +123,6 @@ you can resume later.
 
 ## Notes
 
-- Runs as a set of parallel worker processes, each with its own persistent
-  browser profile, so multiple accounts can scrape different keyword
-  subsets simultaneously.
 - The classifier is a hand-tuned, regex/rule-based pipeline rather than a
   trained model — interpretable and easy to audit, at the cost of needing
   manual tuning as language patterns drift.
