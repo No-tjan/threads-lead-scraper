@@ -1172,10 +1172,42 @@ THIRD_PERSON = re.compile(
 
 # Past-tense KPR markers — "aku ambil KPR dulu", "waktu itu saya KPR".
 PAST_TENSE_KPR = re.compile(
-    r"\b(?:dulu|kemarin|tadi|waktu\s+itu|tahun\s+lalu|bulan\s+lalu|"
+    r"\b(?:dulu|kemarin|tadi|barusan|waktu\s+itu|tahun\s+lalu|bulan\s+lalu|"
     r"pas\s+waktu|dulu\s+saya|dulu\s+aku)\b.{0,60}\bkpr\b",
     re.IGNORECASE,
 )
+
+# Possessive-of-third-party: "teman saya", "keluarga saya", "adik saya" …
+# The first-person pronoun here is a POSSESSOR, not the sentence subject.
+# "Teman saya mau take over KPR" is NOT a first-person lead.
+THIRD_PARTY_POSSESSIVE = re.compile(
+    r"\b(?:teman|sahabat|saudara|sepupu|keponakan|tetangga|"
+    r"orang\s+tua|keluarga|adik|kakak|anak|pacar|pasangan|"
+    r"rekan|rekan\s+kerja|teman\s+kerja|teman\s+kantor|"
+    r"teman-teman|sahabat-sahabat|saudara-saudara|"
+    r"mertua|menantu|ipar|besan)"
+    r"\b(?:teman|keluarga|adik|kakak|pacar|saudara)(?:ku|mu|nya)\b"
+    r"\s+(?:saya|aku|gue|gw|kami|kita)\b",
+    re.IGNORECASE,
+)
+
+
+def _count_subject_first_person(text: str) -> int:
+    """Count first-person pronouns that are NOT possessors of a
+    third-party noun. 'Teman saya' -> not counted.
+    'Saya dan teman saya' -> the leading 'saya' IS counted."""
+    possessive_positions: set[int] = set()
+    for m in THIRD_PARTY_POSSESSIVE.finditer(text):
+        inner = m.group(0)
+        pm = FIRST_PERSON.search(inner)
+        if pm:
+            possessive_positions.add(m.start() + pm.start())
+
+    count = 0
+    for m in FIRST_PERSON.finditer(text):
+        if m.start() not in possessive_positions:
+            count += 1
+    return count
 
 # Teaching phrases that indicate the author is explaining, not living.
 TEACHING_PHRASES = re.compile(
@@ -1206,11 +1238,11 @@ def split_into_sentences(text: str) -> list[str]:
 
 def analyze_kpr_subject(text: str) -> dict[str, int]:
     """Determine whether the AUTHOR of this post is personally
-    invested in KPR, or whether they're teaching/telling a story.
+    invested in KPR, or whether they're teaching/telling a story
+    about someone else.
 
-    Uses post-level pronoun ratios rather than sentence-level
-    because Indonesian routinely drops subjects and splits
-    pronouns and KPR across separate clauses.
+    Possessive pronouns attached to a third-party noun
+    ('teman saya', 'keluarga saya') do NOT count as first-person.
     """
     raw = str(text or "")
     if not KPR_TOKEN.search(raw):
@@ -1223,12 +1255,20 @@ def analyze_kpr_subject(text: str) -> dict[str, int]:
             "total_kpr_sentences": 0,
         }
 
-    first_count = len(FIRST_PERSON.findall(raw))
+    all_first = len(FIRST_PERSON.findall(raw))
+    subject_first = _count_subject_first_person(raw)
     second_count = len(SECOND_PERSON.findall(raw))
     third_count = len(THIRD_PERSON.findall(raw))
 
-    # Default: OP posts are about the OP. If no pronouns at all,
-    # treat as first-person (subject-drop).
+    # If every first-person pronoun was a possessor of a third party
+    # ("teman saya", "keluarga saya"), the subject is third-person.
+    if all_first > 0 and subject_first == 0 and second_count == 0:
+        third_count = max(third_count, 1)
+        first_count = 0
+    else:
+        first_count = subject_first
+
+    # Default: OP posts are about the OP.
     if first_count == 0 and second_count == 0 and third_count == 0:
         return {
             "first_person_kpr_sentences": 1,
@@ -1239,7 +1279,6 @@ def analyze_kpr_subject(text: str) -> dict[str, int]:
             "total_kpr_sentences": 1,
         }
 
-    # Whichever pronoun class dominates determines the subject.
     dominant = max(first_count, second_count, third_count)
 
     if first_count == dominant:
@@ -4029,15 +4068,7 @@ def collect_and_classify_parallel(
         print("Resuming previous scrape.")
     else:
         print("Starting a new scrape.")
-    
-        if PROCESSED_POSTS_FILE.exists():
-            PROCESSED_POSTS_FILE.unlink()
-    
-        if KEYWORD_PROGRESS_FILE.exists():
-            KEYWORD_PROGRESS_FILE.unlink()
-            
-        for checkpoint_file in CHECKPOINT_FOLDER.glob("worker_*.csv"):
-            checkpoint_file.unlink()
+        archive_state_before_reset()
     
             
     keyword_chunks = split_keywords(
@@ -4768,16 +4799,40 @@ def parse_arguments() -> argparse.Namespace:
 
     return parser.parse_args()
 
-
 def reset_collection_state() -> None:
     for file_path in (PROCESSED_POSTS_FILE, KEYWORD_PROGRESS_FILE):
         if file_path.exists():
             file_path.unlink()
     print("Saved collection state was cleared. Browser login was kept.")
 
+def archive_state_before_reset() -> None:
+    """Move state files into a timestamped archive instead of deleting
+    them. Called when the user answers 'n' to resume. Prevents the
+    accidental data loss that silently drops leads from a previous run."""
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    archive = STATE_FOLDER / f"_archive_{stamp}"
+    archive.mkdir(parents=True, exist_ok=True)
+
+    moved: list[str] = []
+    for path in (PROCESSED_POSTS_FILE, KEYWORD_PROGRESS_FILE):
+        if path.exists():
+            path.rename(archive / path.name)
+            moved.append(path.name)
+
+    for ckpt in CHECKPOINT_FOLDER.glob("worker_*.csv"):
+        ckpt.rename(archive / ckpt.name)
+        moved.append(ckpt.name)
+
+    print(f"[RESET] Archived {len(moved)} state file(s) to:")
+    print(f"[RESET]   {archive}")
+
 
 def main() -> None:
     args = parse_arguments()
+    
+    if args.self_test:
+        run_self_tests()
+        return     
 
     if args.postprocess_only:
         output_folder = Path(args.output).expanduser().resolve()
